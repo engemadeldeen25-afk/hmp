@@ -23,12 +23,8 @@ void main() {
   runApp(const HmpApp());
 }
 
-// ============================================================
-//  APP
-// ============================================================
 class HmpApp extends StatelessWidget {
   const HmpApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -46,15 +42,6 @@ class HmpApp extends StatelessWidget {
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF0A0E1A),
           elevation: 0,
-          centerTitle: false,
-        ),
-        cardTheme: CardThemeData(
-          color: const Color(0xFF151B2E),
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: Color(0xFF2A3654)),
-          ),
         ),
       ),
       home: const HomePage(),
@@ -62,25 +49,31 @@ class HmpApp extends StatelessWidget {
   }
 }
 
-// ============================================================
-//  MODELS
-// ============================================================
-class LWDReading {
-  final double evd;
-  final double deflection;
-  final double accel;
-  final double velocity;
-  final double angle;
-  final DateTime time;
+class LiveData {
+  double acc;
+  double vel;
+  double disp;
+  double angle;
+  double peakEVD;
+  double peakDef;
+  double peakAcc;
+  bool isImpact;
+  bool hasNewTest;
+  int packetNum;
+  DateTime lastPacket;
 
-  LWDReading({
-    required this.evd,
-    required this.deflection,
-    required this.accel,
-    required this.velocity,
-    required this.angle,
-    required this.time,
-  });
+  LiveData()
+      : acc = 0,
+        vel = 0,
+        disp = 0,
+        angle = 0,
+        peakEVD = 0,
+        peakDef = 0,
+        peakAcc = 0,
+        isImpact = false,
+        hasNewTest = false,
+        packetNum = 0,
+        lastPacket = DateTime.now();
 }
 
 class TestPoint {
@@ -91,7 +84,6 @@ class TestPoint {
   final double latitude;
   final double longitude;
   final bool passed;
-
   TestPoint({
     required this.id,
     required this.time,
@@ -103,9 +95,6 @@ class TestPoint {
   });
 }
 
-// ============================================================
-//  HOME PAGE
-// ============================================================
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
   @override
@@ -113,6 +102,7 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  // BLE
   BluetoothDevice? _device;
   BluetoothCharacteristic? _rx;
   StreamSubscription<List<int>>? _sub;
@@ -120,18 +110,16 @@ class _HomePageState extends State<HomePage> {
   bool _connected = false;
   String _status = "Disconnected";
 
-  LWDReading _live = LWDReading(
-    evd: 0,
-    deflection: 0,
-    accel: 0,
-    velocity: 0,
-    angle: 0,
-    time: DateTime.now(),
-  );
-  final List<double> _waveform = List.filled(60, 0);
+  // Live data
+  final LiveData _live = LiveData();
+  final List<double> _waveform = List.filled(80, 0);
+  Timer? _uiTimer;
+
+  // Tests
   final List<TestPoint> _tests = [];
   int _nextId = 1;
 
+  // Calibration
   double _calFactor = 1.0;
   String _calDate = 'Never';
   double _targetEvd = 40.0;
@@ -142,10 +130,15 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _init();
+    // Refresh UI every 100ms so "data receiving" indicator updates
+    _uiTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
   void dispose() {
+    _uiTimer?.cancel();
     _sub?.cancel();
     _device?.disconnect();
     super.dispose();
@@ -197,14 +190,14 @@ class _HomePageState extends State<HomePage> {
     } catch (_) {}
     await Future.delayed(const Duration(milliseconds: 500));
 
-    BluetoothDevice? foundDevice;
+    BluetoothDevice? found;
 
     final sub = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
-        final name = r.device.platformName;
-        final advName = r.advertisementData.advName;
-        if (name.contains("LWD") || advName.contains("LWD")) {
-          if (foundDevice == null) foundDevice = r.device;
+        final n = r.device.platformName;
+        final an = r.advertisementData.advName;
+        if (n.contains("LWD") || an.contains("LWD")) {
+          if (found == null) found = r.device;
         }
       }
     });
@@ -222,11 +215,11 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
     setState(() => _scanning = false);
 
-    if (foundDevice != null) {
-      _connect(foundDevice!);
+    if (found != null) {
+      _connect(found!);
     } else {
       setState(() => _status = "Not found");
-      _snack("No LWD device found - tap scan again");
+      _snack("No LWD device found");
     }
   }
 
@@ -305,30 +298,38 @@ class _HomePageState extends State<HomePage> {
       if (!t.startsWith("{")) return;
       final m = jsonDecode(t) as Map<String, dynamic>;
 
-      final evd = (m["evd"] ?? 0).toDouble() * _calFactor;
-      final def = (m["def"] ?? 0).toDouble();
-      final acc = (m["acc"] ?? 0).toDouble();
-      final vel = (m["vel"] ?? 0).toDouble();
-      final ang = (m["angle"] ?? 0).toDouble();
+      // LIVE values
+      _live.acc = (m["acc"] ?? 0).toDouble();
+      _live.vel = (m["vel"] ?? 0).toDouble();
+      _live.disp = (m["disp"] ?? 0).toDouble();
+      _live.angle = (m["angle"] ?? 0).toDouble();
 
-      if (!mounted) return;
-      setState(() {
-        _live = LWDReading(
-          evd: evd,
-          deflection: def,
-          accel: acc,
-          velocity: vel,
-          angle: ang,
-          time: DateTime.now(),
-        );
-        if (def > 0) {
-          _waveform.add(def);
-          if (_waveform.length > 60) _waveform.removeAt(0);
-        }
-      });
+      // PEAK values
+      _live.peakEVD = (m["evd"] ?? 0).toDouble() * _calFactor;
+      _live.peakDef = (m["def"] ?? 0).toDouble();
+      _live.peakAcc = (m["peak_acc"] ?? 0).toDouble();
 
-      if (def > 0.1 && evd > 0.5) _recordTest(evd, def);
-    } catch (_) {}
+      // Status
+      _live.isImpact = (m["imp"] ?? 0) == 1;
+      _live.hasNewTest = (m["new"] ?? 0) == 1;
+      _live.packetNum = (m["n"] ?? 0).toInt();
+      _live.lastPacket = DateTime.now();
+
+      // Update waveform with live displacement
+      _waveform.add(_live.disp);
+      if (_waveform.length > 80) _waveform.removeAt(0);
+
+      // Log new test
+      if (_live.hasNewTest &&
+          _live.peakEVD > 0.5 &&
+          _live.peakDef > 0.05) {
+        _recordTest(_live.peakEVD, _live.peakDef);
+      }
+
+      if (mounted) setState(() {});
+    } catch (e) {
+      print("Parse error: $e");
+    }
   }
 
   Future<void> _recordTest(double evd, double def) async {
@@ -336,7 +337,6 @@ class _HomePageState extends State<HomePage> {
         DateTime.now().difference(_tests.last.time).inSeconds < 2) {
       return;
     }
-
     double lat = 0, lng = 0;
     try {
       final pos = await Geolocator.getCurrentPosition(
@@ -346,7 +346,6 @@ class _HomePageState extends State<HomePage> {
       lat = pos.latitude;
       lng = pos.longitude;
     } catch (_) {}
-
     final p = TestPoint(
       id: _nextId++,
       time: DateTime.now(),
@@ -367,8 +366,8 @@ class _HomePageState extends State<HomePage> {
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF151B2E),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: const [
+        title: const Row(
+          children: [
             Icon(Icons.lock_outline, color: Colors.amber),
             SizedBox(width: 8),
             Text('Calibration Access'),
@@ -474,18 +473,9 @@ class _HomePageState extends State<HomePage> {
       _snack('No tests to export');
       return;
     }
-
     final rows = <List<dynamic>>[
-      [
-        'Test #',
-        'Date',
-        'Time',
-        'EVD (MN/m²)',
-        'Deflection (mm)',
-        'Latitude',
-        'Longitude',
-        'Status'
-      ],
+      ['Test #', 'Date', 'Time', 'EVD (MN/m²)', 'Deflection (mm)',
+        'Latitude', 'Longitude', 'Status'],
     ];
     for (final t in _tests) {
       rows.add([
@@ -499,15 +489,13 @@ class _HomePageState extends State<HomePage> {
         t.passed ? 'PASS' : 'FAIL',
       ]);
     }
-
     final csv = const ListToCsvConverter().convert(rows);
     try {
       final dir = await getApplicationDocumentsDirectory();
       final f = File(
           '${dir.path}/HMP_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
       await f.writeAsString(csv);
-      await Share.shareXFiles([XFile(f.path)],
-          subject: 'HMP - Test Report');
+      await Share.shareXFiles([XFile(f.path)], subject: 'HMP - Test Report');
       _snack('Report exported');
     } catch (e) {
       _snack('Export failed: $e');
@@ -525,9 +513,12 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  bool get _receivingData =>
+      DateTime.now().difference(_live.lastPacket).inMilliseconds < 500;
+
   @override
   Widget build(BuildContext context) {
-    final passed = _live.evd >= _targetEvd;
+    final passed = _live.peakEVD >= _targetEvd;
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 16,
@@ -572,7 +563,6 @@ class _HomePageState extends State<HomePage> {
                     color: _connected ? Colors.greenAccent : null,
                   ),
             onPressed: (_connected || _scanning) ? null : _startScan,
-            tooltip: _connected ? 'Connected' : 'Scan',
           ),
           IconButton(
             icon: const Icon(Icons.power_settings_new),
@@ -588,11 +578,13 @@ class _HomePageState extends State<HomePage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _buildLiveCard(passed),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
+            _buildLiveValuesCard(),
+            const SizedBox(height: 12),
             _buildChartCard(),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             _buildStatsCard(),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             _buildActions(),
             const SizedBox(height: 24),
           ],
@@ -602,15 +594,21 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _statusBadge() {
+    final color = _connected
+        ? (_receivingData ? Colors.green.shade700 : Colors.orange.shade800)
+        : (_status == "Scanning..." || _status == "Connecting...")
+            ? Colors.orange.shade800
+            : Colors.red.shade800;
+
+    final text = _connected
+        ? (_receivingData ? "LIVE" : "Waiting...")
+        : _status;
+
     return Center(
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: _connected
-              ? Colors.green.shade800.withOpacity(0.8)
-              : (_status == "Scanning..." || _status == "Connecting...")
-                  ? Colors.orange.shade800.withOpacity(0.8)
-                  : Colors.red.shade800.withOpacity(0.8),
+          color: color.withOpacity(0.85),
           borderRadius: BorderRadius.circular(20),
         ),
         child: Row(
@@ -620,19 +618,21 @@ class _HomePageState extends State<HomePage> {
               width: 6,
               height: 6,
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: _receivingData ? Colors.white : Colors.white60,
                 shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.white.withOpacity(0.6),
-                    blurRadius: 4,
-                  ),
-                ],
+                boxShadow: _receivingData
+                    ? [
+                        const BoxShadow(
+                          color: Colors.white,
+                          blurRadius: 6,
+                        ),
+                      ]
+                    : null,
               ),
             ),
             const SizedBox(width: 6),
             Text(
-              _status,
+              text,
               style: const TextStyle(
                 fontSize: 10,
                 fontWeight: FontWeight.bold,
@@ -659,15 +659,6 @@ class _HomePageState extends State<HomePage> {
           color: passed ? Colors.green.withOpacity(0.4) : const Color(0xFF2A3654),
           width: 1.2,
         ),
-        boxShadow: [
-          BoxShadow(
-            color: passed
-                ? Colors.green.withOpacity(0.15)
-                : Colors.black.withOpacity(0.3),
-            blurRadius: 20,
-            spreadRadius: 1,
-          ),
-        ],
       ),
       child: Column(
         children: [
@@ -676,7 +667,7 @@ class _HomePageState extends State<HomePage> {
             children: [
               _metric(
                 'EVD MODULUS',
-                _live.evd.toStringAsFixed(1),
+                _live.peakEVD.toStringAsFixed(1),
                 'MN/m²',
                 const Color(0xFF00E5FF),
                 46,
@@ -685,16 +676,16 @@ class _HomePageState extends State<HomePage> {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   _metric(
-                    'DEFLECTION',
-                    _live.deflection.toStringAsFixed(3),
+                    'PEAK DEFLECTION',
+                    _live.peakDef.toStringAsFixed(3),
                     'mm',
                     Colors.orangeAccent,
                     26,
                   ),
                   const SizedBox(height: 10),
                   _metric(
-                    'ACCEL',
-                    _live.accel.toStringAsFixed(2),
+                    'PEAK ACCEL',
+                    _live.peakAcc.toStringAsFixed(2),
                     'g',
                     Colors.purpleAccent,
                     18,
@@ -716,14 +707,6 @@ class _HomePageState extends State<HomePage> {
                         : [Colors.red.shade700, Colors.red.shade900],
                   ),
                   borderRadius: BorderRadius.circular(24),
-                  boxShadow: [
-                    BoxShadow(
-                      color:
-                          (passed ? Colors.green : Colors.red).withOpacity(0.4),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
                 ),
                 child: Row(
                   children: [
@@ -752,7 +735,7 @@ class _HomePageState extends State<HomePage> {
                     ClipRRect(
                       borderRadius: BorderRadius.circular(8),
                       child: LinearProgressIndicator(
-                        value: (_live.evd / 80).clamp(0.0, 1.0),
+                        value: (_live.peakEVD / 80).clamp(0.0, 1.0),
                         minHeight: 10,
                         backgroundColor: Colors.grey.shade900,
                         valueColor: AlwaysStoppedAnimation(
@@ -780,22 +763,97 @@ class _HomePageState extends State<HomePage> {
               ),
             ],
           ),
-          const SizedBox(height: 16),
-          const Divider(color: Color(0xFF2A3654), height: 1),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLiveValuesCard() {
+    final accentColor = _live.isImpact
+        ? Colors.orangeAccent
+        : const Color(0xFF00E5FF);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF151B2E),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: _live.isImpact ? Colors.orangeAccent : const Color(0xFF2A3654),
+          width: _live.isImpact ? 1.5 : 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.waves, color: accentColor, size: 16),
+              const SizedBox(width: 8),
+              Text(
+                _live.isImpact ? 'IMPACT DETECTED!' : 'LIVE DATA',
+                style: TextStyle(
+                    color: accentColor,
+                    fontSize: 11,
+                    letterSpacing: 1.5,
+                    fontWeight: FontWeight.w600),
+              ),
+              const Spacer(),
+              Text(
+                'Pkt #${_live.packetNum}',
+                style: TextStyle(
+                    color: Colors.grey.shade600,
+                    fontSize: 10,
+                    fontFamily: 'monospace'),
+              ),
+            ],
+          ),
           const SizedBox(height: 12),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
-              _smallInfo(
-                  Icons.speed, '${_live.velocity.toStringAsFixed(3)} m/s'),
-              _smallInfo(
-                  Icons.straighten, '${_live.angle.toStringAsFixed(1)}°'),
-              _smallInfo(
-                  Icons.timer, DateFormat('HH:mm:ss').format(_live.time)),
+              _liveValue('ACCELERATION',
+                  _live.acc.toStringAsFixed(3), 'g', Colors.purpleAccent),
+              _liveValue('VELOCITY',
+                  _live.vel.toStringAsFixed(4), 'm/s', Colors.greenAccent),
+              _liveValue('DISPLACEMENT',
+                  _live.disp.toStringAsFixed(3), 'mm', Colors.orangeAccent),
+              _liveValue('TILT',
+                  _live.angle.toStringAsFixed(1), '°', const Color(0xFF00E5FF)),
             ],
           ),
         ],
       ),
+    );
+  }
+
+  Widget _liveValue(String label, String value, String unit, Color color) {
+    return Column(
+      children: [
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+            color: color,
+            fontFamily: 'monospace',
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          unit,
+          style: TextStyle(fontSize: 9, color: Colors.grey.shade500),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 8,
+            color: Colors.grey.shade600,
+            letterSpacing: 0.5,
+          ),
+        ),
+      ],
     );
   }
 
@@ -838,22 +896,6 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _smallInfo(IconData icon, String text) {
-    return Row(
-      children: [
-        Icon(icon, size: 14, color: const Color(0xFF00E5FF).withOpacity(0.8)),
-        const SizedBox(width: 5),
-        Text(
-          text,
-          style: TextStyle(
-              color: Colors.grey.shade400,
-              fontSize: 11,
-              fontWeight: FontWeight.w500),
-        ),
-      ],
-    );
-  }
-
   Widget _buildChartCard() {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -870,7 +912,7 @@ class _HomePageState extends State<HomePage> {
               const Icon(Icons.show_chart, color: Color(0xFF00E5FF), size: 16),
               const SizedBox(width: 8),
               const Text(
-                'DEFLECTION WAVEFORM',
+                'LIVE DISPLACEMENT WAVEFORM',
                 style: TextStyle(
                     color: Colors.grey,
                     fontSize: 11,
@@ -881,7 +923,7 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(height: 12),
           SizedBox(
-            height: 150,
+            height: 160,
             child: LineChart(
               LineChartData(
                 gridData: FlGridData(
@@ -896,9 +938,9 @@ class _HomePageState extends State<HomePage> {
                 titlesData: const FlTitlesData(show: false),
                 borderData: FlBorderData(show: false),
                 minX: 0,
-                maxX: 59,
-                minY: -0.2,
-                maxY: 2.5,
+                maxX: 79,
+                minY: -2.0,
+                maxY: 3.0,
                 lineBarsData: [
                   LineChartBarData(
                     spots: _waveform
@@ -907,7 +949,7 @@ class _HomePageState extends State<HomePage> {
                         .map((e) => FlSpot(e.key.toDouble(), e.value))
                         .toList(),
                     isCurved: true,
-                    curveSmoothness: 0.35,
+                    curveSmoothness: 0.25,
                     color: const Color(0xFF00E5FF),
                     barWidth: 2.5,
                     dotData: const FlDotData(show: false),
@@ -949,12 +991,12 @@ class _HomePageState extends State<HomePage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          const Row(
             children: [
-              const Icon(Icons.analytics_outlined,
+              Icon(Icons.analytics_outlined,
                   color: Color(0xFF1E88E5), size: 16),
-              const SizedBox(width: 8),
-              const Text(
+              SizedBox(width: 8),
+              Text(
                 'TEST SUMMARY',
                 style: TextStyle(
                     color: Colors.grey,
@@ -985,10 +1027,7 @@ class _HomePageState extends State<HomePage> {
         Text(
           value,
           style: TextStyle(
-            fontSize: 24,
-            fontWeight: FontWeight.bold,
-            color: color,
-          ),
+              fontSize: 24, fontWeight: FontWeight.bold, color: color),
         ),
         const SizedBox(height: 2),
         Text(
@@ -1022,8 +1061,6 @@ class _HomePageState extends State<HomePage> {
               padding: const EdgeInsets.symmetric(vertical: 16),
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14)),
-              elevation: 4,
-              shadowColor: const Color(0xFF1E88E5).withOpacity(0.5),
             ),
           ),
         ),
@@ -1049,8 +1086,6 @@ class _HomePageState extends State<HomePage> {
               padding: const EdgeInsets.symmetric(vertical: 16),
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14)),
-              elevation: 4,
-              shadowColor: Colors.red.shade900.withOpacity(0.5),
             ),
           ),
         ),
