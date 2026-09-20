@@ -1,0 +1,17 @@
+workflows:
+  android-debug:
+    name: HMP Android Build
+    max_build_duration: 60
+    environment:
+      flutter: stable
+    scripts:
+      - name: Get Flutter packages
+        script: |
+          cd $CM_BUILD_DIR
+          flutter pub get
+      - name: Build APK
+        script: |
+          cd $CM_BUILD_DIR
+          flutter build apk --debug
+    artifacts:
+      - $CM_BUILD_DIR/build/app/outputs/flutter-apk/*.apk
